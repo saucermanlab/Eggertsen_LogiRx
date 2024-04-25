@@ -1,0 +1,357 @@
+---
+title: "AERsMiner"
+author: "Taylor Eggertsen"
+date: "Nov 7, 2023"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load Libraries & Data
+
+```{r, message=FALSE}
+library(tidyverse)
+library(dplyr)
+library(stringr)
+library(ggbreak)
+library(rstatix)
+library(ggpubr)
+
+# Include the filenames of all data included in analysis
+anxset <- c('aers_anx_escitalopram.tsv','aers_anx_buspirone.tsv',
+           'aers_anx_fluoxetine.tsv','aers_anx_paroxetine.tsv','aers_anx_sertraline.tsv',
+           'aers_anx_venlafaxine.tsv','aers_anx_trazodone.tsv')
+depset <- c('aers_dep_escitalopram.tsv','aers_dep_doxorubicin.tsv',
+           'aers_dep_fluoxetine.tsv','aers_dep_paroxetine.tsv','aers_dep_sertraline.tsv',
+           'aers_dep_venlafaxine.tsv')
+
+totrep <- read_tsv('aers_total_reports.tsv')
+totrep <- totrep[grepl('Abs',colnames(totrep))]
+names(totrep) <- as.character(unlist(totrep[1,]))
+totrep <- totrep[5,]
+
+anxrep <- read_tsv('aers_anx_reports.tsv')
+deprep <- read_tsv('aers_dep_reports.tsv')
+
+# Select set of interest and drug order
+fname <- anxset
+indrep <- anxrep
+
+drugorder <- c('doxorubicin','escitalopram','buspirone','fluoxetine','paroxetine','sertraline','venlafaxine','trazodone')
+# drugorder <- c('mifepristone','metyrapone','ketoconazole')
+#drugorder <- c('doxorubicin','midostaurin','decitabine','azacitidine')
+
+
+adverse <- c('left ventricular hypertrophy','ventricular hypertrophy','cardiac hypertrophy', 'heart failures','cardiac failure')
+ae <- adverse[1]
+
+# select portion of population for analysis 
+populations <- names(totrep)
+pop <- populations[24] # 24 for esc
+doi <- drugorder[2] # 2 for esc
+
+```
+
+## Compile Data for Analysis
+
+# Read data from files
+
+```{r, message=FALSE}
+# Initialize arrays
+fn <- length(fname)
+dat <- array(data=NA, dim=c(length(adverse)+1,25,fn))
+cname <- array(data=NA, dim=c(25,fn))
+
+# Population values
+indrep <- cbind(indrep[3],indrep[4],indrep[grepl('Abs',colnames(indrep))])
+indrep <- indrep %>% filter(!is.na(...3))
+names(indrep) <- as.character(unlist(indrep[1,]))
+indrep <- indrep[-1,]
+
+pospop <- which(colnames(totrep)==pop)
+totalpop <- as.numeric(gsub(",","",totrep[pospop]))
+reps <- as.numeric(gsub(",","",indrep[,pospop+2]))
+names(reps) <- indrep$`Adverse Events`
+reptot <- reps[1]
+repae <- reps[-1]
+
+# Select data from files
+totalae <- 1:length(adverse)
+names(totalae) <- adverse
+for (i in 1:fn){
+  input <- read_tsv(fname[i])
+  inp <- cbind(input[4],input[5],input[grepl('Abs',colnames(input))])
+  inp <- inp %>% filter(!is.na(...4))
+  names(inp) <- as.character(unlist(inp[1,]))
+  if (dim(inp)[1]>0){
+    totaladverse <- as.numeric(gsub(",","",inp$`Total_Adverse Events_Reports`[-c(1,2)]))
+    names(totaladverse) <- inp$`Adverse Events`[-c(1,2)]
+    totalae[match(names(totaladverse),names(totalae))] <- totaladverse
+  }
+  inp <- inp[-1,]
+  inp <- inp[,-2]
+  if (dim(inp)[1]<length(adverse)+1) {
+    newrow <- rep(0,25)
+    for (j in 1:(length(adverse)+1-dim(inp)[1])) {
+      inp <- rbind(inp,newrow)
+    }
+  }
+  dat[,,i] <- as.matrix(inp)
+  cname[,i] <- colnames(inp)
+}
+
+```
+
+# Organize data into dataframe
+
+```{r}
+# Organize dataframe of values
+## drug and column names
+colnam <- cname[,1]
+drugnam <- cname[2,]
+nam <- strsplit(cname,'_')
+for (j in 1:fn){
+  drugnam[j] <- nam[[j*length(nam)/fn]][2]
+}
+for (j in 1:25){
+  if (length(nam[[j]])>1){
+    colnam[j] <- nam[[j]][length(nam[[j]])]
+  } 
+}
+## Compile into single dataframe
+df <- data.frame(dat[,,1])
+colnames(df) <- colnam
+df$treatment <- drugnam[1]
+
+for (i in 2:fn){
+  dfnext <- data.frame(dat[,,i])
+  colnames(dfnext) <- colnam
+  dfnext$treatment <- drugnam[i]
+  df <- rbind(df,dfnext)
+}
+
+df <- df %>% 
+  add_column(grp=df[,which(colnames(df)==pop)])
+```
+
+## Slice Through desired Adverse Events
+
+```{r}
+
+## Slice Dataframe for Specific Analysis
+
+aersdata <- df %>% 
+  select(treatment,`Adverse Events`,grp) %>%
+  mutate(reports=ifelse(`Adverse Events`=='Unique Patients'|`Adverse Events`=='Unique Patients:',grp,NA),
+         totaereports=totalae[match(df$`Adverse Events`,names(totalae))],
+         indreports=repae[match(df$`Adverse Events`,names(repae))]) %>% 
+  fill(reports) %>% 
+  filter(`Adverse Events`!='Unique Patients') %>% 
+  filter(`Adverse Events`!='Unique Patients:')
+aersdata$grp <- sapply(aersdata$grp, as.numeric)
+aersdata$reports <- sapply(gsub(",", "", aersdata$reports), as.numeric)
+
+# Data as matrix
+xt <- aersdata %>% 
+  filter(`Adverse Events`==ae) %>% 
+  mutate(LVH=grp, None=reports-grp)
+indrep <- unique(xt$indreports)
+xt <- xt %>% 
+  select(LVH,None) %>% 
+  add_row(LVH=indrep, None=reptot-indrep) %>% 
+  drop_na() %>% 
+  data.matrix()
+rownames(xt) <- c(unique(drop_na(filter(aersdata,`Adverse Events`==ae))$treatment),'population')
+
+# Data as events per 1000
+xtd <- aersdata %>% 
+  filter(`Adverse Events`==ae) %>% 
+  mutate(LVH=10^3*grp/reports) %>% 
+  select(treatment,reports,LVH) %>% 
+  drop_na()
+
+```
+
+## Data Analysis
+
+```{r}
+
+# One proportion z-test for each treatment
+n <- array(data=NA, dim=c(dim(xt)[1],2))
+nmat <- array(data=NA, dim=c(2,2,dim(xt)[1]))
+nmatd <- nmat
+prow <- array(data=NA, dim=dim(xt)[1])
+prowd <- prow
+for (x in 1:dim(xt)[1]){
+  n[x,] <- c(sum(xt[-x,1]),sum(xt[-x,2]))
+  #nmat[,,x] <- rbind(xt[x,],n[x,])
+  nmat[,,x] <- rbind(xt[x,],xt[dim(xt)[1],])
+  nmatd[,,x] <- rbind(xt[x,],xt[str_detect(rownames(xt),doi)])
+  prow[x] <- chisq.test(nmat[,,x])$p.value
+  prowd[x] <- chisq.test(nmatd[,,x])$p.value
+}
+prow <- p.adjust(prow,method='holm') # each component compared to population 
+prowd <- p.adjust(prowd,method='holm') # each component compared to drug of interest
+
+xtpp <- xtd %>% 
+  #add_row(treatment='all treatments',reports=sum(xt), LVH=1000*sum(xt[,1])/sum(xt)) %>% 
+  add_row(treatment='all patients',reports=reptot, LVH=1000*indrep/reptot) %>%
+  add_column(Pvalue=prowd) 
+xtpp$treatment <- factor(xtpp$treatment, levels=c('all patients',drugorder))
+
+```
+
+## Visualize Results
+
+```{r}
+## groups compared
+# pstat <- data.frame(group1 = c("all patients",drugorder[1],drugorder[4:7]), 
+#                     group2 = c(rep("escitalopram",6)),
+#                     xmin = c(1,2,rep(3,4)),
+#                     xmax = c(3,3:7),
+#                     p.value = signif(c(prowd[7],prowd[2:6]),1))
+pstat <- data.frame(group1 = c("all patients",drugorder[1],drugorder[4:7]),
+                    group2 = c(rep("mifepristone",6)),
+                    xmin = c(1,2,rep(3,4)),
+                    xmax = c(3,3:7),
+                    p.value = signif(c(prowd[7],prowd[2:6]),1))
+pstat <- pstat %>% 
+  mutate(p.sig=case_when(p.value>0.05~'ns',p.value>0.01~'*',
+                         p.value>0.001~'**',!is.na(p.value)~'***'))
+
+h <- 1.12*max(xtpp$LVH)
+hco <- 0.97
+hset1 <- c(13.4,13.8)
+hset2 <- c(13.4,14.6)
+# hco <- 0.99
+xtpp %>% 
+  ggplot(aes(x=treatment, y=LVH)) +
+  geom_bar(stat='identity', show.legend=FALSE, color='black',aes(fill=treatment)) +
+  scale_fill_brewer(palette='Purples') +
+  # geom_text(aes(label=paste('p =',signif(Pvalue,2))), nudge_y=0.08, size=3, y=h) +
+  # geom_text(aes(label=paste('n =',scales::comma(reports))), 
+            # nudge_y=0.03, size=3, y=hco*h) +
+  stat_pvalue_manual(pstat, label='p.sig', 
+                     y.position=c(seq(hset1[1],hset1[2],by=(hset1[2]-hset1[1])/(1)),
+                                  seq(hset2[1],hset2[2],by=(hset2[2]-hset2[1])/(3))),
+                     size=3, tip.length=0.01) +
+  ylim(0,h) +
+  # scale_y_break(c(4,25)) +
+  # scale_y_break(c(7,13)) +
+  labs(y=paste(str_to_title(ae),'Reports per 1000'),
+       title=paste(str_to_title(pop),'Population')) +
+  theme_classic()
+  
+```
+
+```{r}
+# Adapt for TriNetX -------------------------------------------------------
+## LVH-Anxiety 
+# xt_tri <- matrix(c(6180,50,2070,20,3830,40,1200,10,
+#                    8300,80,2220,20,3340,40,55640,340),nrow=8,byrow=T)
+# treatment <- c('Escitalopram','Buspirone','Fluoxetine','Paroxetine',
+#                       'Sertraline','Venlafaxine','Trazodone','All Patients')
+# ae <- 'LVH'
+# reports <- rowSums(xt_tri)
+# LVH <- (10^3)*xt_tri[,2]/reports
+# rownames(xt_tri) <- treatment
+# colnames(xt_tri) <- c('None',ae)
+# xtd_tri <- data.frame(treatment,reports,LVH)
+
+## LVH-Depression
+# xt_tri <- matrix(c(1270,10,320,10,1200,10,150,10,
+#                    1790,20,690,10,730,10,9360,40),nrow=8,byrow=T)
+# treatment <- c('Escitalopram','Buspirone','Fluoxetine','Paroxetine',
+#                       'Sertraline','Venlafaxine','Trazodone','All Patients')
+# ae <- 'LVH'
+# reports <- rowSums(xt_tri)
+# LVH <- (10^3)*xt_tri[,2]/reports
+# rownames(xt_tri) <- treatment
+# colnames(xt_tri) <- c('None',ae)
+# xtd_tri <- data.frame(treatment,reports,LVH)
+
+## HF-Anxiety
+# xt_tri <- matrix(c(6020,210,1990,110,3720,140,1140,70,
+#                    8040,330,2120,120,3100,280,54160,1820),nrow=8,byrow=T)
+# treatment <- c('Escitalopram','Buspirone','Fluoxetine','Paroxetine',
+#                       'Sertraline','Venlafaxine','Trazodone','All Patients')
+# ae <- 'HF'
+# reports <- rowSums(xt_tri)
+# LVH <- (10^3)*xt_tri[,2]/reports
+# rownames(xt_tri) <- treatment
+# colnames(xt_tri) <- c('None',ae)
+# xtd_tri <- data.frame(treatment,reports,LVH)
+
+## HF-Depression
+xt_tri <- matrix(c(1260,20,320,10,1180,30,150,0,
+                   1760,40,670,30,720,20,9220,180),nrow=8,byrow=T)
+treatment <- c('Escitalopram','Buspirone','Fluoxetine','Paroxetine',
+                      'Sertraline','Venlafaxine','Trazodone','All Patients')
+ae <- 'HF'
+reports <- rowSums(xt_tri)
+LVH <- (10^3)*xt_tri[,2]/reports
+rownames(xt_tri) <- treatment
+colnames(xt_tri) <- c('None',ae)
+xtd_tri <- data.frame(treatment,reports,LVH)
+
+# One proportion z-test for each treatment
+xt <- xt_tri
+xtd <- xtd_tri
+n <- array(data=NA, dim=c(dim(xt)[1],2))
+nmat <- array(data=NA, dim=c(2,2,dim(xt)[1]))
+nmatd <- nmat
+prow <- array(data=NA, dim=dim(xt)[1])
+prowd <- prow
+for (x in 1:dim(xt)[1]){
+  n[x,] <- c(sum(xt[-x,1]),sum(xt[-x,2]))
+  #nmat[,,x] <- rbind(xt[x,],n[x,])
+  nmat[,,x] <- rbind(xt[x,],xt[dim(xt)[1],])
+  nmatd[,,x] <- rbind(xt[x,],xt[str_detect(rownames(xt),treatment[1])])
+  prow[x] <- chisq.test(nmat[,,x])$p.value
+  prowd[x] <- chisq.test(nmatd[,,x])$p.value
+}
+prow <- p.adjust(prow,method='holm') # each component compared to population 
+prowd <- p.adjust(prowd,method='holm') # each component compared to drug of interest
+
+xtpp <- xtd %>% 
+  #add_row(treatment='all treatments',reports=sum(xt), LVH=1000*sum(xt[,1])/sum(xt)) %>% 
+  add_column(Pvalue=prowd)
+xtpp$treatment <- factor(xtpp$treatment, levels=c('All Patients',treatment[1:7]))
+
+#Visualize results
+pstat <- data.frame(group1 = c(treatment[8],treatment[2:7]), 
+                    group2 = c(rep(treatment[2],7)),
+                    xmin = c(1,rep(2,6)),
+                    xmax = c(2:8),
+                    p.value = signif(c(prowd[8],prowd[2:7]),1))
+pstat <- pstat %>% 
+  mutate(p.sig=case_when(p.value>0.05~'ns',p.value>0.01~'*',
+                         p.value>0.001~'**',!is.na(p.value)~'***'))
+
+h <- 1.12*max(xtpp$LVH)
+hco <- 0.97
+hset1 <- c(23,33)
+hset2 <- c(36,48)
+xtpp %>% 
+  ggplot(aes(x=treatment, y=LVH)) +
+  geom_bar(stat='identity', show.legend=FALSE, color='black',aes(fill=treatment)) +
+  scale_fill_brewer(palette='Greens') +
+  stat_pvalue_manual(pstat, label='p.sig',
+                     y.position=c(seq(hset1[1],hset1[2],by=(hset1[2]-hset1[1])/(1)),
+                                  seq(hset2[1],hset2[2],by=(hset2[2]-hset2[1])/(4))),
+                     size=3, tip.length=0.02) +
+  ylim(0,h) +
+  # scale_y_break(c(32,60)) +
+  # labs(y='Left Ventricular Hypertrophy per 1000 Patients',
+  labs(y='Heart Failure per 10^6 Patients',
+       title='Population') +
+  theme_classic()
+```
+
